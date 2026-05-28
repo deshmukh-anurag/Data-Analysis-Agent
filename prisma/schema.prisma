@@ -1,0 +1,28 @@
+// Prisma schema for the Store Sales Price Elasticity Promotions dataset.
+// Mirrors the columns used in the DeepLearning.AI lab so the agent can answer
+// the same natural-language questions against Postgres instead of DuckDB.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model SalesTransaction {
+  id                  Int      @id @default(autoincrement())
+  storeNumber         Int      @map("store_number")
+  skuCoded            String   @map("sku_coded")
+  productClassCode    Int      @map("product_class_code")
+  soldDate            DateTime @map("sold_date") @db.Date
+  qtySold             Float    @map("qty_sold")
+  totalSaleValue      Float    @map("total_sale_value")
+  onPromotion         Boolean  @map("on_promotion")
+
+  @@index([storeNumber])
+  @@index([soldDate])
+  @@index([skuCoded])
+  @@map("sales_transactions")
+}
