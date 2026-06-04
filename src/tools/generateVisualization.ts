@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { traceTool } from "@arizeai/phoenix-otel";
 import { generateJSON } from "../gemini.js";
 import { VIZ_CONFIG_PROMPT } from "../prompts.js";
 
@@ -69,15 +70,18 @@ function inferType(
   return "nominal";
 }
 
-export async function generateVisualization(
-  userPrompt: string,
-  rows: Record<string, unknown>[],
-  preview: string,
-): Promise<Visualization> {
-  const raw = await generateJSON<unknown>(VIZ_CONFIG_PROMPT(userPrompt, preview));
-  const config = ChartConfig.parse(raw);
-  return {
-    config,
-    vegaLiteSpec: buildVegaLite(config, rows),
-  };
-}
+export const generateVisualization = traceTool(
+  async (
+    userPrompt: string,
+    rows: Record<string, unknown>[],
+    preview: string,
+  ): Promise<Visualization> => {
+    const raw = await generateJSON<unknown>(VIZ_CONFIG_PROMPT(userPrompt, preview));
+    const config = ChartConfig.parse(raw);
+    return {
+      config,
+      vegaLiteSpec: buildVegaLite(config, rows),
+    };
+  },
+  { name: "generate_visualization" },
+);

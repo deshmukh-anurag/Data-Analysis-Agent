@@ -9,9 +9,12 @@ The original lab uses Python + DuckDB + OpenAI. This version uses:
 - **TypeScript** (Node 22+, ESM)
 - **Prisma + PostgreSQL** as the ORM and database
 - **Google Gemini** (free tier — `gemini-2.0-flash` by default) via `@google/genai`
+- **Arize Phoenix** for tracing via `@arizeai/phoenix-otel` (the official Node SDK)
 
 The agent answers natural-language questions about a retail sales dataset by
-orchestrating three tools through Gemini's function-calling loop.
+orchestrating three tools through Gemini's function-calling loop. Every agent
+run, router step, tool call, and Gemini call is instrumented as an
+OpenInference span and exported to Phoenix.
 
 ## Architecture
 
@@ -74,6 +77,43 @@ npm run db:push      # creates the sales_transactions table
 npm run seed         # inserts ~2.5k synthetic rows for Nov–Dec 2021
 ```
 
+### 4. Phoenix (tracing — optional but recommended)
+
+Run Phoenix locally with Docker:
+
+```bash
+docker run -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest
+```
+
+Then open http://localhost:6006 to view the trace UI. The defaults in
+`.env.example` already point at `http://localhost:6006`, so as soon as Phoenix
+is running, every `npm run ask` invocation will show up as a trace under the
+project `data-anal-agent` with this span hierarchy:
+
+```
+data-anal-agent          (AGENT — the runAgent call)
+├── router.step          (LLM — Gemini turn 1, with tool calls)
+├── lookup_sales_data    (TOOL)
+│   └── gemini.generateText   (LLM — SQL generation)
+├── router.step          (LLM — Gemini turn 2)
+├── analyze_sales_data   (TOOL)
+│   └── gemini.generateText   (LLM — written analysis)
+└── router.step          (LLM — final answer)
+```
+
+LLM spans include model name, provider, input/output messages, token counts
+from `usageMetadata`, and tool-call/response payloads.
+
+For Phoenix Cloud instead of local, set:
+
+```bash
+PHOENIX_COLLECTOR_ENDPOINT="https://app.phoenix.arize.com"
+PHOENIX_API_KEY="your-cloud-key"
+```
+
+To disable tracing, just don't start Phoenix — the OTLP exporter will fail
+quietly and the agent continues working.
+
 ## Use it
 
 ```bash
@@ -117,15 +157,16 @@ prisma/
   seed.ts               # deterministic synthetic data
 src/
   cli.ts                # entry point — `npm run ask -- "…"`
-  agent.ts              # Gemini function-calling router loop
-  gemini.ts             # @google/genai wrapper
+  agent.ts              # Gemini function-calling router loop (wrapped in traceAgent)
+  gemini.ts             # @google/genai wrapper with LLM-span instrumentation
+  tracing.ts            # phoenix-otel register() bootstrap
   prisma.ts             # shared PrismaClient
   config.ts             # env loading
   prompts.ts            # system + per-tool prompt templates
   tools/
-    lookupSalesData.ts      # NL → SQL → Postgres (read-only guarded)
-    analyzeSalesData.ts     # LLM markdown analysis
-    generateVisualization.ts# LLM JSON config → Vega-Lite spec
+    lookupSalesData.ts      # NL → SQL → Postgres (read-only guarded, traceTool)
+    analyzeSalesData.ts     # LLM markdown analysis (traceTool)
+    generateVisualization.ts# LLM JSON config → Vega-Lite spec (traceTool)
 ```
 
 ## Differences from the original Python lab
@@ -142,3 +183,8 @@ src/
 - **matplotlib code → Vega-Lite spec.** The TS runtime can't execute Python,
   so emitting matplotlib source would be dead text. A Vega-Lite JSON spec is
   portable, renderable in any frontend, and keeps the tool genuinely useful.
+- **Phoenix tracing via the TS SDK.** Arize ships `@arizeai/phoenix-otel` for
+  Node.js — `register()` configures the OTLP exporter, and `traceAgent` /
+  `traceTool` / manual LLM spans with `getLLMAttributes()` produce the same
+  OpenInference span shape Phoenix expects from the Python SDK. The UI
+  doesn't care which language emitted the trace.

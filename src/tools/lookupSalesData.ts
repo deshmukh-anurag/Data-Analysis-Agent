@@ -1,3 +1,4 @@
+import { traceTool } from "@arizeai/phoenix-otel";
 import { prisma } from "../prisma.js";
 import { generateText } from "../gemini.js";
 import { SQL_GENERATION_PROMPT } from "../prompts.js";
@@ -55,17 +56,18 @@ function formatCell(v: unknown): string {
   return String(v);
 }
 
-export async function lookupSalesData(prompt: string): Promise<LookupResult> {
-  const generated = await generateText(SQL_GENERATION_PROMPT(prompt));
-  const sql = stripCodeFences(generated);
-  assertReadOnly(sql);
-
-  const rows = (await prisma.$queryRawUnsafe(sql)) as Record<string, unknown>[];
-
-  return {
-    sql,
-    rowCount: rows.length,
-    rows,
-    preview: toMarkdownTable(rows),
-  };
-}
+export const lookupSalesData = traceTool(
+  async (prompt: string): Promise<LookupResult> => {
+    const generated = await generateText(SQL_GENERATION_PROMPT(prompt));
+    const sql = stripCodeFences(generated);
+    assertReadOnly(sql);
+    const rows = (await prisma.$queryRawUnsafe(sql)) as Record<string, unknown>[];
+    return {
+      sql,
+      rowCount: rows.length,
+      rows,
+      preview: toMarkdownTable(rows),
+    };
+  },
+  { name: "lookup_sales_data" },
+);

@@ -1,6 +1,6 @@
 import { Type, type Content, type FunctionDeclaration } from "@google/genai";
-import { genai } from "./gemini.js";
-import { config } from "./config.js";
+import { traceAgent } from "@arizeai/phoenix-otel";
+import { tracedGenerateContent } from "./gemini.js";
 import { ROUTER_SYSTEM_PROMPT } from "./prompts.js";
 import { lookupSalesData, type LookupResult } from "./tools/lookupSalesData.js";
 import { analyzeSalesData } from "./tools/analyzeSalesData.js";
@@ -72,7 +72,12 @@ export interface AgentRun {
   trace: AgentTrace[];
 }
 
-export async function runAgent(userQuestion: string): Promise<AgentRun> {
+export const runAgent = traceAgent(
+  _runAgent,
+  { name: "data-anal-agent" },
+);
+
+async function _runAgent(userQuestion: string): Promise<AgentRun> {
   const trace: AgentTrace[] = [];
   // Most-recent lookup result — tools downstream of lookup operate on it.
   let lastLookup: LookupResult | null = null;
@@ -82,14 +87,16 @@ export async function runAgent(userQuestion: string): Promise<AgentRun> {
   ];
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const response = await genai.models.generateContent({
-      model: config.geminiModel,
-      contents: history,
-      config: {
-        systemInstruction: ROUTER_SYSTEM_PROMPT,
-        tools: [{ functionDeclarations: toolDeclarations }],
+    const response = await tracedGenerateContent(
+      {
+        contents: history,
+        config: {
+          systemInstruction: ROUTER_SYSTEM_PROMPT,
+          tools: [{ functionDeclarations: toolDeclarations }],
+        },
       },
-    });
+      "router.step",
+    );
 
     const calls = response.functionCalls ?? [];
 

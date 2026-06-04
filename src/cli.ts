@@ -1,3 +1,4 @@
+import { shutdownTracing } from "./tracing.js";
 import { runAgent } from "./agent.js";
 import { prisma } from "./prisma.js";
 
@@ -63,4 +64,5 @@ main()
   })
   .finally(async () => {
     await prisma.$disconnect();
+    await shutdownTracing();
   });
