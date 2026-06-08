@@ -1,4 +1,4 @@
-import { shutdownTracing } from "./tracing.js";
+import { AIMessage, ToolMessage } from "@langchain/core/messages";
 import { runAgent } from "./agent.js";
 import { prisma } from "./prisma.js";
 
@@ -9,6 +9,10 @@ function readStdin(): Promise<string> {
     process.stdin.on("data", (chunk) => (data += chunk));
     process.stdin.on("end", () => resolve(data.trim()));
   });
+}
+
+function truncate(s: string, max = 800): string {
+  return s.length > max ? s.slice(0, max) + "\n… (truncated)" : s;
 }
 
 async function main() {
@@ -30,31 +34,36 @@ async function main() {
   console.log(`\nQuestion: ${question}\n`);
 
   const start = Date.now();
-  const { finalAnswer, trace } = await runAgent(question);
+  const { finalAnswer, messages } = await runAgent(question);
   const elapsed = ((Date.now() - start) / 1000).toFixed(2);
 
   console.log("─".repeat(60));
-  console.log("Tool trace");
+  console.log("Message trace");
   console.log("─".repeat(60));
-  for (const [i, t] of trace.entries()) {
-    console.log(`\n[${i + 1}] ${t.toolName}`);
-    console.log(`    args: ${JSON.stringify(t.args)}`);
-    const resultStr = JSON.stringify(t.result, null, 2);
-    const truncated =
-      resultStr.length > 1200 ? resultStr.slice(0, 1200) + "\n… (truncated)" : resultStr;
-    console.log(
-      truncated
-        .split("\n")
-        .map((l) => `    ${l}`)
-        .join("\n"),
-    );
+  for (const m of messages) {
+    if (m instanceof AIMessage && m.tool_calls && m.tool_calls.length > 0) {
+      for (const tc of m.tool_calls) {
+        console.log(`\n[call] ${tc.name}`);
+        console.log(`       args: ${JSON.stringify(tc.args)}`);
+      }
+    } else if (m instanceof ToolMessage) {
+      const content =
+        typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+      console.log(`\n[result] ${m.name ?? "tool"}`);
+      console.log(
+        truncate(content)
+          .split("\n")
+          .map((l) => "         " + l)
+          .join("\n"),
+      );
+    }
   }
 
   console.log("\n" + "─".repeat(60));
   console.log("Final answer");
   console.log("─".repeat(60));
   console.log(finalAnswer);
-  console.log(`\n(${elapsed}s, ${trace.length} tool call${trace.length === 1 ? "" : "s"})`);
+  console.log(`\n(${elapsed}s, ${messages.length} messages)`);
 }
 
 main()
@@ -64,5 +73,4 @@ main()
   })
   .finally(async () => {
     await prisma.$disconnect();
-    await shutdownTracing();
   });

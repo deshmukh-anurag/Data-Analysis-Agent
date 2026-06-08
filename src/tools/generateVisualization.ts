@@ -1,7 +1,8 @@
+import { tool } from "@langchain/core/tools";
 import { z } from "zod";
-import { traceTool } from "@arizeai/phoenix-otel";
-import { generateJSON } from "../gemini.js";
+import { model } from "../gemini.js";
 import { VIZ_CONFIG_PROMPT } from "../prompts.js";
+import type { LookupResult } from "./lookupSalesData.js";
 
 const ChartConfig = z.object({
   chart_type: z.enum(["bar", "line", "pie", "scatter"]),
@@ -10,54 +11,6 @@ const ChartConfig = z.object({
   title: z.string(),
 });
 export type ChartConfig = z.infer<typeof ChartConfig>;
-
-export interface Visualization {
-  config: ChartConfig;
-  /**
-   * Vega-Lite spec — a portable, JSON-only chart spec the caller can hand to
-   * any frontend (or render via `vega-cli`). We deliberately do not generate
-   * Python/matplotlib code: it's not executable in this TS runtime and would
-   * just be dead text.
-   */
-  vegaLiteSpec: Record<string, unknown>;
-}
-
-function buildVegaLite(
-  cfg: ChartConfig,
-  rows: Record<string, unknown>[],
-): Record<string, unknown> {
-  const markByChart: Record<ChartConfig["chart_type"], string> = {
-    bar: "bar",
-    line: "line",
-    scatter: "point",
-    pie: "arc",
-  };
-  const mark = markByChart[cfg.chart_type];
-
-  if (cfg.chart_type === "pie") {
-    return {
-      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-      title: cfg.title,
-      data: { values: rows },
-      mark: { type: "arc" },
-      encoding: {
-        theta: { field: cfg.y_axis, type: "quantitative" },
-        color: { field: cfg.x_axis, type: "nominal" },
-      },
-    };
-  }
-
-  return {
-    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-    title: cfg.title,
-    data: { values: rows },
-    mark,
-    encoding: {
-      x: { field: cfg.x_axis, type: inferType(rows, cfg.x_axis) },
-      y: { field: cfg.y_axis, type: inferType(rows, cfg.y_axis) },
-    },
-  };
-}
 
 function inferType(
   rows: Record<string, unknown>[],
@@ -70,18 +23,65 @@ function inferType(
   return "nominal";
 }
 
-export const generateVisualization = traceTool(
-  async (
-    userPrompt: string,
-    rows: Record<string, unknown>[],
-    preview: string,
-  ): Promise<Visualization> => {
-    const raw = await generateJSON<unknown>(VIZ_CONFIG_PROMPT(userPrompt, preview));
-    const config = ChartConfig.parse(raw);
+function buildVegaLite(
+  cfg: ChartConfig,
+  rows: Record<string, unknown>[],
+): Record<string, unknown> {
+  if (cfg.chart_type === "pie") {
     return {
-      config,
-      vegaLiteSpec: buildVegaLite(config, rows),
+      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+      title: cfg.title,
+      data: { values: rows },
+      mark: { type: "arc" },
+      encoding: {
+        theta: { field: cfg.y_axis, type: "quantitative" },
+        color: { field: cfg.x_axis, type: "nominal" },
+      },
     };
-  },
-  { name: "generate_visualization" },
-);
+  }
+  const mark = cfg.chart_type === "scatter" ? "point" : cfg.chart_type;
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    title: cfg.title,
+    data: { values: rows },
+    mark,
+    encoding: {
+      x: { field: cfg.x_axis, type: inferType(rows, cfg.x_axis) },
+      y: { field: cfg.y_axis, type: inferType(rows, cfg.y_axis) },
+    },
+  };
+}
+
+export function makeGenerateVisualization(getLast: () => LookupResult | null) {
+  const structuredModel = model.withStructuredOutput(ChartConfig, {
+    name: "chart_config",
+  });
+  return tool(
+    async ({ prompt }) => {
+      const last = getLast();
+      if (!last) {
+        return JSON.stringify({
+          error: "No data to visualize. Call lookup_sales_data first.",
+        });
+      }
+      try {
+        const cfg = await structuredModel.invoke(VIZ_CONFIG_PROMPT(prompt, last.preview));
+        const spec = buildVegaLite(cfg, last.rows);
+        return JSON.stringify({ chart_config: cfg, vega_lite_spec: spec });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return JSON.stringify({ error: msg });
+      }
+    },
+    {
+      name: "generate_visualization",
+      description:
+        "Generate a chart configuration (Vega-Lite spec) for the most recently returned result set. Use only when a chart/plot/graph is requested.",
+      schema: z.object({
+        prompt: z
+          .string()
+          .describe("What the visualization should communicate."),
+      }),
+    },
+  );
+}

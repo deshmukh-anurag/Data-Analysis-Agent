@@ -1,12 +1,12 @@
-import { traceTool } from "@arizeai/phoenix-otel";
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
 import { prisma } from "../prisma.js";
-import { generateText } from "../gemini.js";
+import { chatText } from "../gemini.js";
 import { SQL_GENERATION_PROMPT } from "../prompts.js";
 
 const FORBIDDEN = /\b(insert|update|delete|drop|alter|truncate|grant|revoke|create|copy|vacuum)\b/i;
 
 function stripCodeFences(sql: string): string {
-  // Gemini occasionally wraps SQL in ```sql … ``` despite instructions.
   return sql
     .replace(/^```(?:sql)?\s*/i, "")
     .replace(/```$/i, "")
@@ -31,7 +31,15 @@ export interface LookupResult {
   sql: string;
   rowCount: number;
   rows: Record<string, unknown>[];
-  preview: string; // markdown table for use as LLM context downstream
+  preview: string;
+}
+
+function formatCell(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === "bigint") return v.toString();
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
 }
 
 function toMarkdownTable(rows: Record<string, unknown>[], maxRows = 20): string {
@@ -48,26 +56,37 @@ function toMarkdownTable(rows: Record<string, unknown>[], maxRows = 20): string 
   return [header, sep, body].join("\n") + footer;
 }
 
-function formatCell(v: unknown): string {
-  if (v === null || v === undefined) return "";
-  if (v instanceof Date) return v.toISOString().slice(0, 10);
-  if (typeof v === "bigint") return v.toString();
-  if (typeof v === "object") return JSON.stringify(v);
-  return String(v);
+export function makeLookupSalesData(onResult: (r: LookupResult) => void) {
+  return tool(
+    async ({ prompt }) => {
+      const generated = await chatText(SQL_GENERATION_PROMPT(prompt));
+      const sql = stripCodeFences(generated);
+      assertReadOnly(sql);
+      const rows = (await prisma.$queryRawUnsafe(sql)) as Record<string, unknown>[];
+      const result: LookupResult = {
+        sql,
+        rowCount: rows.length,
+        rows,
+        preview: toMarkdownTable(rows),
+      };
+      onResult(result);
+      return JSON.stringify({
+        sql,
+        row_count: rows.length,
+        preview_markdown: result.preview,
+      });
+    },
+    {
+      name: "lookup_sales_data",
+      description:
+        "Run a read-only SQL query (generated from the natural-language prompt) against the sales_transactions table and return the resulting rows.",
+      schema: z.object({
+        prompt: z
+          .string()
+          .describe(
+            "Natural-language description of the data you want, e.g. 'total revenue per store in November 2021'.",
+          ),
+      }),
+    },
+  );
 }
-
-export const lookupSalesData = traceTool(
-  async (prompt: string): Promise<LookupResult> => {
-    const generated = await generateText(SQL_GENERATION_PROMPT(prompt));
-    const sql = stripCodeFences(generated);
-    assertReadOnly(sql);
-    const rows = (await prisma.$queryRawUnsafe(sql)) as Record<string, unknown>[];
-    return {
-      sql,
-      rowCount: rows.length,
-      rows,
-      preview: toMarkdownTable(rows),
-    };
-  },
-  { name: "lookup_sales_data" },
-);
